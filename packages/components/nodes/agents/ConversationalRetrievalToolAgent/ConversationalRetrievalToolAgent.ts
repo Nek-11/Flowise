@@ -117,10 +117,15 @@ class ConversationalRetrievalToolAgent_Agents implements INode {
     }
 
     async init(nodeData: INodeData, input: string, options: ICommonObject): Promise<any> {
-        return prepareAgent(nodeData, options, { sessionId: this.sessionId, chatId: options.chatId, input })
+        // Don't prepare the agent here - it needs the actual runtime input for rephrasing
+        // The agent will be prepared in run() with the correct user message
+        return null
     }
 
     async run(nodeData: INodeData, input: string, options: ICommonObject): Promise<string | ICommonObject> {
+        console.log('\n============ ConversationalRetrievalToolAgent Run Start ============')
+        console.time('[ConversationalRetrievalToolAgent] TOTAL_RUN')
+        
         const memory = nodeData.inputs?.memory as FlowiseMemory
         const moderations = nodeData.inputs?.inputModeration as Moderation[]
 
@@ -141,7 +146,9 @@ class ConversationalRetrievalToolAgent_Agents implements INode {
             }
         }
 
+        console.time('[ConversationalRetrievalToolAgent] PrepareAgent')
         const executor = await prepareAgent(nodeData, options, { sessionId: this.sessionId, chatId: options.chatId, input })
+        console.timeEnd('[ConversationalRetrievalToolAgent] PrepareAgent')
 
         const loggerHandler = new ConsoleCallbackHandler(options.logger, options?.orgId)
         const callbacks = await additionalCallbacks(nodeData, options)
@@ -150,6 +157,7 @@ class ConversationalRetrievalToolAgent_Agents implements INode {
         let sourceDocuments: ICommonObject[] = []
         let usedTools: IUsedTool[] = []
 
+        console.time('[ConversationalRetrievalToolAgent] ExecutorInvoke')
         if (shouldStreamResponse) {
             const handler = new CustomChainHandler(sseStreamer, chatId)
             res = await executor.invoke({ input }, { callbacks: [loggerHandler, handler, ...callbacks] })
@@ -186,6 +194,7 @@ class ConversationalRetrievalToolAgent_Agents implements INode {
                 usedTools = res.usedTools
             }
         }
+        console.timeEnd('[ConversationalRetrievalToolAgent] ExecutorInvoke')
 
         let output = res?.output as string
 
@@ -211,6 +220,9 @@ class ConversationalRetrievalToolAgent_Agents implements INode {
             ],
             this.sessionId
         )
+
+        console.timeEnd('[ConversationalRetrievalToolAgent] TOTAL_RUN')
+        console.log('============ ConversationalRetrievalToolAgent Run End ============\n')
 
         let finalRes = res?.output
 
@@ -300,25 +312,30 @@ const prepareAgent = async (
     const getStandaloneQuestion = async (input: string): Promise<string> => {
         // If no rephrase prompt, return the original input
         if (!rephrasePrompt) {
+            console.log('[ConversationalRetrievalToolAgent] Rephrasing: SKIPPED (no rephrase prompt)')
             return input
         }
 
-        // Get chat history. If no chat history, return original input
+        // Get chat history (use empty string if none)
         const messages = (await memory.getChatMessages(flowObj?.sessionId, true)) as BaseMessage[]
+        const chatHistoryString = messages && messages.length > 0 
+            ? messages.map((message) => `${message._getType()}: ${message.content}`).join('\n')
+            : ''
 
-        if (!messages || messages.length === 0) {
-            return input
-        }
-
-        // Create rephrase chain just like in ConversationalRetrievalQAChain
+        // Always rephrase to normalize/expand user queries for better retrieval
         try {
+            const startTime = Date.now()
             const CONDENSE_QUESTION_PROMPT = PromptTemplate.fromTemplate(rephrasePrompt)
             const condenseQuestionChain = RunnableSequence.from([CONDENSE_QUESTION_PROMPT, model, new StringOutputParser()])
-            const chatHistoryString = messages.map((message) => `${message._getType()}: ${message.content}`).join('\n')
-            return await condenseQuestionChain.invoke({
+            const res = await condenseQuestionChain.invoke({
                 question: input,
                 chat_history: chatHistoryString
             })
+            const duration = Date.now() - startTime
+            console.log(`[ConversationalRetrievalToolAgent] Rephrasing: ${duration}ms ${chatHistoryString ? '(with history)' : '(no history - normalizing query)'}`)
+            console.log(`[ConversationalRetrievalToolAgent] Original: "${input}"`)
+            console.log(`[ConversationalRetrievalToolAgent] Rephrased: "${res}"`)
+            return res
         } catch (error) {
             console.error('Error rephrasing question:', error)
             // On error, fall back to original input
@@ -327,7 +344,9 @@ const prepareAgent = async (
     }
 
     // Get standalone question before creating runnable
+    console.log('[ConversationalRetrievalToolAgent] Getting standalone question...')
     const standaloneQuestion = await getStandaloneQuestion(flowObj?.input || '')
+    console.log(`[ConversationalRetrievalToolAgent] Will use for retrieval: "${standaloneQuestion}"`)
 
     const runnableAgent = RunnableSequence.from([
         {
@@ -340,7 +359,11 @@ const prepareAgent = async (
             context: async (i: { input: string; chatHistory?: string }) => {
                 // Use the standalone question (rephrased or original) for retrieval
                 const retrievalQuery = standaloneQuestion || i.input
+                const startTime = Date.now()
+                console.log(`[ConversationalRetrievalToolAgent] Starting retrieval with query: "${retrievalQuery}"`)
                 const relevantDocs = await vectorStoreRetriever.invoke(retrievalQuery)
+                const duration = Date.now() - startTime
+                console.log(`[ConversationalRetrievalToolAgent] Retrieval: ${duration}ms (found ${relevantDocs.length} docs)`)
                 const formattedDocs = formatDocs(relevantDocs)
                 return formattedDocs
             }
