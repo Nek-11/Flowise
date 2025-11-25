@@ -231,7 +231,6 @@ class ConversationalRetrievalQAChain_Chains implements INode {
             callbacks.push(new LCConsoleCallbackHandler())
         }
 
-        console.time('[ConversationalRetrievalQAChain] Total Run')
         const stream = answerChain.streamLog(
             { question: input, chat_history: history },
             { callbacks },
@@ -285,7 +284,6 @@ class ConversationalRetrievalQAChain_Chains implements INode {
                 }
             }
         }
-        console.timeEnd('[ConversationalRetrievalQAChain] Total Run')
 
         await memory.addChatMessages(
             [
@@ -310,19 +308,7 @@ const createRetrieverChain = (llm: BaseLanguageModel, retriever: Runnable, rephr
     // Small speed/accuracy optimization: no need to rephrase the first question
     // since there shouldn't be any meta-references to prior chat history
     const CONDENSE_QUESTION_PROMPT = PromptTemplate.fromTemplate(rephrasePrompt)
-    const condenseQuestionChain = RunnableSequence.from([
-        RunnableLambda.from((input) => {
-            console.time('[ConversationalRetrievalQAChain] Rephrasing')
-            return input
-        }),
-        CONDENSE_QUESTION_PROMPT,
-        llm,
-        new StringOutputParser(),
-        RunnableLambda.from((output) => {
-            console.timeEnd('[ConversationalRetrievalQAChain] Rephrasing')
-            return output
-        })
-    ]).withConfig({
+    const condenseQuestionChain = RunnableSequence.from([CONDENSE_QUESTION_PROMPT, llm, new StringOutputParser()]).withConfig({
         runName: 'CondenseQuestion'
     })
 
@@ -330,14 +316,7 @@ const createRetrieverChain = (llm: BaseLanguageModel, retriever: Runnable, rephr
         runName: 'HasChatHistoryCheck'
     })
 
-    const monitoredRetriever = RunnableLambda.from(async (input) => {
-        console.time('[ConversationalRetrievalQAChain] Retrieval')
-        const res = await retriever.invoke(input)
-        console.timeEnd('[ConversationalRetrievalQAChain] Retrieval')
-        return res
-    })
-
-    const conversationChain = condenseQuestionChain.pipe(monitoredRetriever).withConfig({
+    const conversationChain = condenseQuestionChain.pipe(retriever).withConfig({
         runName: 'RetrievalChainWithHistory'
     })
 
@@ -345,7 +324,7 @@ const createRetrieverChain = (llm: BaseLanguageModel, retriever: Runnable, rephr
         .withConfig({
             runName: 'Itemgetter:question'
         })
-        .pipe(monitoredRetriever)
+        .pipe(retriever)
         .withConfig({ runName: 'RetrievalChainWithNoHistory' })
 
     return RunnableBranch.from([[hasHistoryCheckFn, conversationChain], basicRetrievalChain]).withConfig({ runName: sourceRunnableName })
