@@ -465,9 +465,10 @@ const insertIntoVectorStore = async (req: Request, res: Response, next: NextFunc
         }
         const subscriptionId = req.user?.activeOrganizationSubscriptionId || ''
         const body = req.body
+        const isStrictSave = body.isStrictSave ?? false
         const apiResponse = await documentStoreService.insertIntoVectorStoreMiddleware(
             body,
-            false,
+            isStrictSave,
             orgId,
             workspaceId,
             subscriptionId,
